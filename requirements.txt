@@ -1,5 +1,8 @@
 streamlit
-pandas
 yfinance
+pandas
+pandas_ta
 plotly
+openai
 numpy
+requests
