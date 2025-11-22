@@ -7,7 +7,6 @@ from plotly.subplots import make_subplots
 import openai
 import numpy as np
 import random
-import requests
 import json
 
 # ==========================================
@@ -21,7 +20,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 強制深色金融終端機風格
 st.markdown("""
     <style>
     .stApp {
@@ -41,7 +39,7 @@ st.markdown("""
         border-radius: 10px;
         padding: 20px;
         border: 1px solid #30363d;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
         margin-bottom: 20px;
     }
     .sub-text { color: #8b949e; font-size: 0.9rem; }
@@ -79,13 +77,9 @@ class StockAnalyzer:
     def calculate_technicals(self):
         if self.df is None or self.df.empty:
             return
-        # RSI
         self.df.ta.rsi(length=14, append=True)
-        # MACD
         self.df.ta.macd(fast=12, slow=26, signal=9, append=True)
-        # Bollinger Bands
         self.df.ta.bbands(length=20, std=2, append=True)
-        # SMA
         self.df["SMA_20"] = ta.sma(self.df["Close"], length=20)
         self.df["SMA_60"] = ta.sma(self.df["Close"], length=60)
         self.df.dropna(inplace=True)
@@ -98,32 +92,32 @@ class StockAnalyzer:
         prev_row = self.df.iloc[-2]
         signals = []
 
-        # 黃金/死亡交叉
         if prev_row["SMA_20"] < prev_row["SMA_60"] and last_row["SMA_20"] > last_row["SMA_60"]:
             signals.append("🔥 [translate:黃金交叉] (Bullish)")
         elif prev_row["SMA_20"] > prev_row["SMA_60"] and last_row["SMA_20"] < last_row["SMA_60"]:
             signals.append("❄️ [translate:死亡交叉] (Bearish)")
 
-        # RSI
         if last_row["RSI_14"] < 30:
             signals.append("🟢 RSI [translate:超賣] (Oversold)")
         elif last_row["RSI_14"] > 70:
             signals.append("🔴 RSI [translate:超買] (Overbought)")
 
-        # 布林通道
-        if last_row["Close"] < last_row["BBL_20_2.0"]:
+        bbl = last_row.get("BBL_20_2.0", None)
+        bbu = last_row.get("BBU_20_2.0", None)
+        close = last_row.get("Close", None)
+
+        if bbl is not None and close is not None and close < bbl:
             signals.append("🟢 [translate:跌破下軌] (Potential Rebound)")
-        elif last_row["Close"] > last_row["BBU_20_2.0"]:
+        if bbu is not None and close is not None and close > bbu:
             signals.append("🔴 [translate:突破上軌] (Overextended)")
 
         return signals
 
 # ==========================================
-# 3. 消息面：OpenAI 情緒分析 (選填)
+# 3. 消息面：OpenAI 情緒分析
 # ==========================================
 
 def analyze_sentiment_with_openai(ticker_symbol: str, api_key: str = None):
-    # 1. 嘗試抓取新聞
     news_list = []
     try:
         ticker = yf.Ticker(ticker_symbol)
@@ -133,7 +127,6 @@ def analyze_sentiment_with_openai(ticker_symbol: str, api_key: str = None):
     except Exception:
         pass
 
-    # 沒抓到就用模擬標題
     if not news_list:
         news_list = [
             f"{ticker_symbol} beats earnings expectations by 15%",
@@ -142,7 +135,6 @@ def analyze_sentiment_with_openai(ticker_symbol: str, api_key: str = None):
             f"Supply chain issues may impact {ticker_symbol} Q4 results",
         ]
 
-    # 2. 有 OpenAI Key 才分析，否則 Mock
     if api_key:
         try:
             joined_titles = "\n".join(f"- {t}" for t in news_list)
@@ -151,7 +143,7 @@ def analyze_sentiment_with_openai(ticker_symbol: str, api_key: str = None):
             You are a senior equity analyst. Analyze the sentiment of the following news headlines for {ticker_symbol}:
             {joined_titles}
             Return one line only in the format: score|short summary
-            where score is -1 to 1.
+            where score is a float between -1 and 1.
             """
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -171,31 +163,24 @@ def analyze_sentiment_with_openai(ticker_symbol: str, api_key: str = None):
     return mock_score, mock_summary, news_list
 
 # ==========================================
-# 4. 基本面：Perplexity API 分析 (KEY 已填入)
+# 4. 基本面分析：Perplexity API (填入您的Key)
 # ==========================================
 
-# [KEY 設定區] 您的 Perplexity API Key 填在這裡
 DEFAULT_PPLX_KEY = "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"
 
 def get_fundamental_target_with_perplexity(ticker_symbol: str, pplx_key: str = None, current_price: float = None):
-    """
-    利用 Perplexity 搜尋最新分析師目標價與共識
-    """
     if current_price is None:
         try:
             current_price = yf.Ticker(ticker_symbol).history(period="1d")["Close"].iloc[-1]
-        except:
+        except Exception:
             current_price = 100.0
 
-    # 優先使用傳入的 Key，若無則使用預設 Key
-    key_to_use = pplx_key if pplx_key else DEFAULT_PPLX_KEY
+    key_to_use = pplx_key or DEFAULT_PPLX_KEY
 
-    # 若完全無 Key，回退至 Mock
     if not key_to_use:
         return _mock_fundamental(current_price)
 
     try:
-        # 這裡使用 Perplexity 的 Base URL
         client = openai.OpenAI(
             api_key=key_to_use,
             base_url="https://api.perplexity.ai",
@@ -203,8 +188,8 @@ def get_fundamental_target_with_perplexity(ticker_symbol: str, pplx_key: str = N
 
         system_prompt = (
             "You are a professional equity research analyst. "
-            "Search the latest web news and broker reports. "
-            "Extract the LATEST consensus analyst 12-month target price, rating consensus, and a summary. "
+            "Search the latest news and broker reports. "
+            "Extract the LATEST consensus analyst 12-month target price, rating consensus, and summary. "
             "Respond ONLY in valid JSON."
         )
 
@@ -212,8 +197,8 @@ def get_fundamental_target_with_perplexity(ticker_symbol: str, pplx_key: str = N
         Stock: {ticker_symbol}
         Current Price: {current_price}
 
-        Please search for the latest analyst target price and consensus.
-        Return JSON format:
+        Please find the latest analyst target price and consensus.
+        Return JSON:
         {{
           "target_price": (number),
           "consensus": "Buy/Hold/Sell",
@@ -221,7 +206,6 @@ def get_fundamental_target_with_perplexity(ticker_symbol: str, pplx_key: str = N
         }}
         """
 
-        # 調用 sonar-pro 模型
         completion = client.chat.completions.create(
             model="sonar-pro",
             messages=[
@@ -232,27 +216,21 @@ def get_fundamental_target_with_perplexity(ticker_symbol: str, pplx_key: str = N
         )
 
         raw = completion.choices[0].message.content.strip()
-        
-        # 清理 JSON 格式 (有時候模型會包 ```
-        if raw.startswith("```"):
+        if raw.startswith("```
             raw = raw.strip("`")
             if raw.startswith("json"): raw = raw[4:]
         
         data = json.loads(raw)
-
         target_price = float(data.get("target_price", current_price))
         consensus = data.get("consensus", "Hold")
         summary = data.get("summary", "目前市場缺乏明確共識。")
-        
         upside_pct = (target_price - current_price) / current_price * 100.0
         return target_price, upside_pct, consensus, summary, False
-
     except Exception as e:
         st.sidebar.error(f"Perplexity API Error: {e}")
         return _mock_fundamental(current_price)
 
 def _mock_fundamental(current_price):
-    """模擬數據 (當 API 失敗時使用)"""
     target_price = round(current_price * random.uniform(1.05, 1.25), 2)
     upside_pct = (target_price - current_price) / current_price * 100.0
     return target_price, upside_pct, "Buy", "Mock Data: Analysts apply cautious optimism.", True
@@ -267,11 +245,9 @@ def calculate_confidence(tech_signals, sentiment_score, upside_pct):
     for sig in tech_signals:
         if any(x in sig for x in ["Bullish", "Oversold", "Potential Rebound"]): tech_score += 20
         if any(x in sig for x in ["Bearish", "Overbought", "Overextended"]): tech_score -= 20
-    
     tech_norm = max(0, min(100, base + tech_score))
     sent_norm = (sentiment_score + 1) * 50
-    fund_norm = max(0, min(100, ((upside_pct + 10) / 40) * 100)) # -10% ~ 30% range
-    
+    fund_norm = max(0, min(100, ((upside_pct + 10) / 40) * 100))
     return int(tech_norm * 0.4 + sent_norm * 0.3 + fund_norm * 0.3)
 
 # ==========================================
@@ -280,23 +256,16 @@ def calculate_confidence(tech_signals, sentiment_score, upside_pct):
 
 def plot_chart(df, ticker):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-
-    # K線
     fig.add_trace(go.Candlestick(
         x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
         name="OHLC", increasing_line_color="#00ff7f", decreasing_line_color="#ff4b4b"
     ), row=1, col=1)
-    
-    # 均線與布林
     fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', line=dict(color='cyan', width=1)), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['BBU_20_2.0'], name='BB Up', line=dict(color='gray', dash='dot', width=0.5)), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['BBL_20_2.0'], name='BB Low', line=dict(color='gray', dash='dot', width=0.5), fill='tonexty'), row=1, col=1)
-
-    # MACD
     fig.add_trace(go.Bar(x=df.index, y=df['MACDh_12_26_9'], name='Hist', marker_color='gray'), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MACD_12_26_9'], name='MACD', line=dict(color='cyan')), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MACDs_12_26_9'], name='Signal', line=dict(color='orange')), row=2, col=1)
-
     fig.update_layout(
         title=f"{ticker} Technical Chart", template="plotly_dark", xaxis_rangeslider_visible=False,
         height=600, margin=dict(l=10,r=10,t=40,b=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
@@ -312,61 +281,43 @@ def main():
         st.title("🤖 AI Quant Pro")
         ticker_input = st.text_input("Stock Ticker", value="AAPL").upper()
         period = st.selectbox("Period", ["6mo", "1y", "2y"], index=1)
-        
         st.markdown("---")
         st.caption("🔑 API Settings")
-        
-        # OpenAI Key (Optional)
         openai_key = st.text_input("OpenAI API Key", type="password", help="Optional for sentiment analysis")
-        
-        # Perplexity Key (UI 預設值會讀取上面的變數)
         pplx_key = st.text_input("Perplexity API Key", value=DEFAULT_PPLX_KEY, type="password")
-        
         st.markdown("---")
         run_btn = st.button("🚀 Run Analysis", type="primary")
 
     if run_btn:
         analyzer = StockAnalyzer(ticker_input)
-        
         with st.spinner(f"Fetching Data for {ticker_input}..."):
             if not analyzer.fetch_data(period):
                 return
-
-        # 1. 技術分析
         analyzer.calculate_technicals()
         signals = analyzer.generate_signals()
-        
-        # 2. 價格數據
         curr_price = analyzer.df['Close'].iloc[-1]
         pct_chg = ((curr_price - analyzer.df['Close'].iloc[-2]) / analyzer.df['Close'].iloc[-2]) * 100
-        
-        # 3. AI 分析
+
         with st.spinner("AI Analyzing Sentiment & Targets..."):
-            # 新聞情緒
             sent_score, sent_summary, headlines = analyze_sentiment_with_openai(ticker_input, openai_key)
-            
-            # 基本面目標價 (使用 Perplexity)
             target, upside, consensus, target_sum, is_mock = get_fundamental_target_with_perplexity(
                 ticker_input, pplx_key, curr_price
             )
-            
-        # 4. 綜合評分
+
         conf_score = calculate_confidence(signals, sent_score, upside)
 
-        # --- UI 顯示 ---
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Current Price", f"${curr_price:.2f}", f"{pct_chg:.2f}%")
         col2.metric("Sentiment Score", f"{sent_score:.2f}")
         col3.metric("Target Upside", f"{upside:.1f}%", f"Target: ${target}")
         col4.metric("Confidence", f"{conf_score}/100")
 
-        c1, c2 = st.columns([2, 1])
+        c1, c2 = st.columns()[1][2]
         with c1:
             st.plotly_chart(plot_chart(analyzer.df, ticker_input), use_container_width=True)
         with c2:
             rec_color = "#00ff7f" if conf_score >= 60 else "#ff4b4b"
             rec_text = "BUY" if conf_score >= 60 else "SELL/HOLD"
-            
             st.markdown(f"""
             <div class="card" style="border-left: 5px solid {rec_color};">
                 <h2 style="color:{rec_color}; margin:0;">{rec_text}</h2>
@@ -376,11 +327,10 @@ def main():
                 <p style="font-size:0.9rem">{target_sum}</p>
             </div>
             """, unsafe_allow_html=True)
-            
             with st.expander("Recent News"):
                 for h in headlines: st.write(f"- {h}")
-            
-            if is_mock: st.caption("⚠️ Using Mock Data (API Error)")
+            if is_mock:
+                st.caption("⚠️ Using Mock Data (API Error)")
 
         st.dataframe(analyzer.df.tail(5)[['Close', 'RSI_14', 'SMA_20', 'MACD_12_26_9']])
 
