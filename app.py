@@ -218,7 +218,8 @@ def get_fundamental_target_with_perplexity(ticker_symbol: str, pplx_key: str = N
         raw = completion.choices[0].message.content.strip()
         if raw.startswith("```
             raw = raw.strip("`")
-            if raw.startswith("json"): raw = raw[4:]
+            if raw.startswith("json"):
+                raw = raw[4:]
         
         data = json.loads(raw)
         target_price = float(data.get("target_price", current_price))
@@ -243,8 +244,10 @@ def calculate_confidence(tech_signals, sentiment_score, upside_pct):
     base = 50
     tech_score = 0
     for sig in tech_signals:
-        if any(x in sig for x in ["Bullish", "Oversold", "Potential Rebound"]): tech_score += 20
-        if any(x in sig for x in ["Bearish", "Overbought", "Overextended"]): tech_score -= 20
+        if any(x in sig for x in ["Bullish", "Oversold", "Potential Rebound"]):
+            tech_score += 20
+        if any(x in sig for x in ["Bearish", "Overbought", "Overextended"]):
+            tech_score -= 20
     tech_norm = max(0, min(100, base + tech_score))
     sent_norm = (sentiment_score + 1) * 50
     fund_norm = max(0, min(100, ((upside_pct + 10) / 40) * 100))
