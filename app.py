@@ -77,6 +77,7 @@ class StockAnalyzer:
     def calculate_technicals(self):
         if self.df is None or self.df.empty:
             return
+        # 確保 pandas_ta 正常運作
         self.df.ta.rsi(length=14, append=True)
         self.df.ta.macd(fast=12, slow=26, signal=9, append=True)
         self.df.ta.bbands(length=20, std=2, append=True)
@@ -92,24 +93,28 @@ class StockAnalyzer:
         prev_row = self.df.iloc[-2]
         signals = []
 
+        # 移動平均交叉
         if prev_row["SMA_20"] < prev_row["SMA_60"] and last_row["SMA_20"] > last_row["SMA_60"]:
-            signals.append("🔥 [translate:黃金交叉] (Bullish)")
+            signals.append("🔥 黃金交叉 (Bullish)")
         elif prev_row["SMA_20"] > prev_row["SMA_60"] and last_row["SMA_20"] < last_row["SMA_60"]:
-            signals.append("❄️ [translate:死亡交叉] (Bearish)")
+            signals.append("❄️ 死亡交叉 (Bearish)")
 
-        if last_row["RSI_14"] < 30:
-            signals.append("🟢 RSI [translate:超賣] (Oversold)")
-        elif last_row["RSI_14"] > 70:
-            signals.append("🔴 RSI [translate:超買] (Overbought)")
+        # RSI 判斷
+        rsi = last_row.get("RSI_14", 50)
+        if rsi < 30:
+            signals.append("🟢 RSI 超賣 (Oversold)")
+        elif rsi > 70:
+            signals.append("🔴 RSI 超買 (Overbought)")
 
+        # 布林通道
         bbl = last_row.get("BBL_20_2.0", None)
         bbu = last_row.get("BBU_20_2.0", None)
         close = last_row.get("Close", None)
 
         if bbl is not None and close is not None and close < bbl:
-            signals.append("🟢 [translate:跌破下軌] (Potential Rebound)")
+            signals.append("🟢 跌破下軌 (Potential Rebound)")
         if bbu is not None and close is not None and close > bbu:
-            signals.append("🔴 [translate:突破上軌] (Overextended)")
+            signals.append("🔴 突破上軌 (Overextended)")
 
         return signals
 
@@ -163,10 +168,11 @@ def analyze_sentiment_with_openai(ticker_symbol: str, api_key: str = None):
     return mock_score, mock_summary, news_list
 
 # ==========================================
-# 4. 基本面分析：Perplexity API (填入您的Key)
+# 4. 基本面分析：Perplexity API
 # ==========================================
 
-DEFAULT_PPLX_KEY = "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"
+# 注意：請勿在公開程式碼中保留真實的 Key，這裡僅為示範
+DEFAULT_PPLX_KEY = "" 
 
 def get_fundamental_target_with_perplexity(ticker_symbol: str, pplx_key: str = None, current_price: float = None):
     if current_price is None:
@@ -183,7 +189,7 @@ def get_fundamental_target_with_perplexity(ticker_symbol: str, pplx_key: str = N
     try:
         client = openai.OpenAI(
             api_key=key_to_use,
-            base_url="https://api.perplexity.ai",
+            base_url="[https://api.perplexity.ai](https://api.perplexity.ai)",
         )
 
         system_prompt = (
@@ -198,7 +204,7 @@ def get_fundamental_target_with_perplexity(ticker_symbol: str, pplx_key: str = N
         Current Price: {current_price}
 
         Please find the latest analyst target price and consensus.
-        Return JSON:
+        Return JSON format strictly:
         {{
           "target_price": (number),
           "consensus": "Buy/Hold/Sell",
@@ -216,10 +222,10 @@ def get_fundamental_target_with_perplexity(ticker_symbol: str, pplx_key: str = N
         )
 
         raw = completion.choices[0].message.content.strip()
-        if raw.startswith("```"
-            raw = raw.strip("`")
-            if raw.startswith("json"):
-                raw = raw[4:]
+        
+        # === [FIX] 修復原本語法錯誤與 JSON 解析 ===
+        if raw.startswith("```"):
+            raw = raw.replace("```json", "").replace("```", "").strip()
         
         data = json.loads(raw)
         target_price = float(data.get("target_price", current_price))
@@ -227,6 +233,7 @@ def get_fundamental_target_with_perplexity(ticker_symbol: str, pplx_key: str = N
         summary = data.get("summary", "目前市場缺乏明確共識。")
         upside_pct = (target_price - current_price) / current_price * 100.0
         return target_price, upside_pct, consensus, summary, False
+        
     except Exception as e:
         st.sidebar.error(f"Perplexity API Error: {e}")
         return _mock_fundamental(current_price)
@@ -258,17 +265,30 @@ def calculate_confidence(tech_signals, sentiment_score, upside_pct):
 # ==========================================
 
 def plot_chart(df, ticker):
+    # 修正：確保使用最新的數據索引
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
     fig.add_trace(go.Candlestick(
         x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
         name="OHLC", increasing_line_color="#00ff7f", decreasing_line_color="#ff4b4b"
     ), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', line=dict(color='cyan', width=1)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['BBU_20_2.0'], name='BB Up', line=dict(color='gray', dash='dot', width=0.5)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['BBL_20_2.0'], name='BB Low', line=dict(color='gray', dash='dot', width=0.5), fill='tonexty'), row=1, col=1)
-    fig.add_trace(go.Bar(x=df.index, y=df['MACDh_12_26_9'], name='Hist', marker_color='gray'), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MACD_12_26_9'], name='MACD', line=dict(color='cyan')), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MACDs_12_26_9'], name='Signal', line=dict(color='orange')), row=2, col=1)
+    
+    # 安全獲取布林通道欄位名稱 (pandas_ta 欄位名稱可能會帶有參數)
+    bbu_col = df.columns[df.columns.str.startswith('BBU_')][0] if any(df.columns.str.startswith('BBU_')) else 'BBU_20_2.0'
+    bbl_col = df.columns[df.columns.str.startswith('BBL_')][0] if any(df.columns.str.startswith('BBL_')) else 'BBL_20_2.0'
+    
+    fig.add_trace(go.Scatter(x=df.index, y=df.get(bbu_col), name='BB Up', line=dict(color='gray', dash='dot', width=0.5)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df.get(bbl_col), name='BB Low', line=dict(color='gray', dash='dot', width=0.5), fill='tonexty'), row=1, col=1)
+    
+    # MACD
+    hist_col = df.columns[df.columns.str.startswith('MACDh_')][0] if any(df.columns.str.startswith('MACDh_')) else 'MACDh_12_26_9'
+    macd_col = df.columns[df.columns.str.startswith('MACD_')][0] if any(df.columns.str.startswith('MACD_')) else 'MACD_12_26_9'
+    signal_col = df.columns[df.columns.str.startswith('MACDs_')][0] if any(df.columns.str.startswith('MACDs_')) else 'MACDs_12_26_9'
+
+    fig.add_trace(go.Bar(x=df.index, y=df.get(hist_col), name='Hist', marker_color='gray'), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df.get(macd_col), name='MACD', line=dict(color='cyan')), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df.get(signal_col), name='Signal', line=dict(color='orange')), row=2, col=1)
+    
     fig.update_layout(
         title=f"{ticker} Technical Chart", template="plotly_dark", xaxis_rangeslider_visible=False,
         height=600, margin=dict(l=10,r=10,t=40,b=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
@@ -299,7 +319,8 @@ def main():
         analyzer.calculate_technicals()
         signals = analyzer.generate_signals()
         curr_price = analyzer.df['Close'].iloc[-1]
-        pct_chg = ((curr_price - analyzer.df['Close'].iloc[-2]) / analyzer.df['Close'].iloc[-2]) * 100
+        prev_price = analyzer.df['Close'].iloc[-2]
+        pct_chg = ((curr_price - prev_price) / prev_price) * 100
 
         with st.spinner("AI Analyzing Sentiment & Targets..."):
             sent_score, sent_summary, headlines = analyze_sentiment_with_openai(ticker_input, openai_key)
@@ -309,15 +330,21 @@ def main():
 
         conf_score = calculate_confidence(signals, sent_score, upside)
 
+        # Metrics
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Current Price", f"${curr_price:.2f}", f"{pct_chg:.2f}%")
         col2.metric("Sentiment Score", f"{sent_score:.2f}")
         col3.metric("Target Upside", f"{upside:.1f}%", f"Target: ${target}")
         col4.metric("Confidence", f"{conf_score}/100")
 
-        c1, c2 = st.columns()[1][2]
+        # === [FIX] 修正排版 Columns ===
+        # 原本錯誤代碼: c1, c2 = st.columns()[1][2]
+        # 修正後: 指定比例，左邊圖表寬(7)，右邊資訊卡窄(3)
+        c1, c2 = st.columns([0.7, 0.3]) 
+        
         with c1:
             st.plotly_chart(plot_chart(analyzer.df, ticker_input), use_container_width=True)
+        
         with c2:
             rec_color = "#00ff7f" if conf_score >= 60 else "#ff4b4b"
             rec_text = "BUY" if conf_score >= 60 else "SELL/HOLD"
@@ -330,13 +357,16 @@ def main():
                 <p style="font-size:0.9rem">{target_sum}</p>
             </div>
             """, unsafe_allow_html=True)
-            with st.expander("Recent News"):
-                for h in headlines: st.write(f"- {h}")
+            
+            with st.expander("Recent News", expanded=True):
+                for h in headlines: 
+                    st.markdown(f"- {h}")
+            
             if is_mock:
-                st.caption("⚠️ Using Mock Data (API Error)")
+                st.caption("⚠️ Using Mock Data (API Error or No Key)")
 
-        st.dataframe(analyzer.df.tail(5)[['Close', 'RSI_14', 'SMA_20', 'MACD_12_26_9']])
+        st.subheader("Latest Data")
+        st.dataframe(analyzer.df.tail(5)[['Close', 'SMA_20', 'SMA_60']])
 
 if __name__ == "__main__":
     main()
-
