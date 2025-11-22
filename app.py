@@ -216,7 +216,7 @@ def get_fundamental_target_with_perplexity(ticker_symbol: str, pplx_key: str = N
         )
 
         raw = completion.choices[0].message.content.strip()
-        if raw.startswith("```
+        if raw.startswith("```"
             raw = raw.strip("`")
             if raw.startswith("json"):
                 raw = raw[4:]
@@ -339,3 +339,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
