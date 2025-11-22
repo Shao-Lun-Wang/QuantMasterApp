@@ -1,159 +1,388 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
-from datetime import datetime
+import pandas as pd
+import pandas_ta as ta
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import openai
+import numpy as np
+import random
+import requests
+import json
 
-# 約200檔高流動台股清單（示意請自行補充完整）
-TW_TOP_200 = [
-    '6770','2344','2408','1802','1815','2317','2337','1303','2881','8358','6173','1605','2409','2887','2330','2615','2885','8043','2883','3481','2449','2801','3715','3231','2324','2884','2891','2327','3702','2303','2890','3037','3711','1504','8112','2002','8069','2610','3624','8042','6163','8150','3706','2609','2312','2301','1314','2882','1101','6191','2486','2481','8021','1301','2886','4958','2377','6282','2618','1326','4989','2515','9813','2353','2472','2880','2892','2371','3260','2368','2308','3026','5425','6274','2375','5498','2867','5328','3189','2382','2834','4577','6919','8110','1519','3017','1216','6505','8422','2356','2492','6208','3036','8046','6209','5880','2027','2329','8048','3048','1402','5314','4904','3236','5351','3006','5469','2105','2201','3264','5876','4938','5243','9805','1717','3167','4967','2498','8034','1409','3450','2347','9904','4979','1513','2421','2478','2412','8039','2495','2354','8111','6442','6239','5871','2603','4763','2374','2454','1514','2641','2812','2637','3105'
-]
+# ==========================================
+# 1. Streamlit 設定與 Dark Mode 風格
+# ==========================================
 
-st.set_page_config(page_title="QuantMaster Pro (高流動池+進度條)", layout="wide", page_icon="📈")
+st.set_page_config(
+    page_title="AI Stock Quant Terminal",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-class DataManager:
-    @staticmethod
-    @st.cache_data(ttl=300)
-    def fetch_price_and_financials(symbol):
-        yf_symbol = symbol if symbol.endswith('.TW') else f"{symbol}.TW"
+# 強制深色金融終端機風格
+st.markdown("""
+    <style>
+    .stApp {
+        background-color: #0e1117;
+        color: #fafafa;
+    }
+    [data-testid="stSidebar"] {
+        background-color: #161b22;
+        border-right: 1px solid #30363d;
+    }
+    [data-testid="stMetricValue"] {
+        font-family: 'Roboto Mono', monospace;
+        font-size: 2.5rem;
+    }
+    .card {
+        background-color: #1e232a;
+        border-radius: 10px;
+        padding: 20px;
+        border: 1px solid #30363d;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        margin-bottom: 20px;
+    }
+    .sub-text { color: #8b949e; font-size: 0.9rem; }
+    .stProgress > div > div > div > div {
+        background-color: #00ff7f;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# ==========================================
+# 2. 股票分析後端類別
+# ==========================================
+
+class StockAnalyzer:
+    def __init__(self, ticker_symbol: str):
+        self.ticker_symbol = ticker_symbol
+        self.ticker = yf.Ticker(ticker_symbol)
+        self.df = None
+        self.info = {}
+
+    def fetch_data(self, period: str = "1y") -> bool:
         try:
-            ticker = yf.Ticker(yf_symbol)
-            df = ticker.history(period="6mo")
-            fin = ticker.financials.T
-            if df.empty or len(df) < 20 or fin.empty:
-                return None, None, None
-            df = df.reset_index()
-            df['Date'] = df['Date'].dt.tz_localize(None)
-            df['MA5'] = df['Close'].rolling(5).mean()
-            df['MA20'] = df['Close'].rolling(20).mean()
-            df['MA60'] = df['Close'].rolling(60).mean()
-            df['MA5_Vol'] = df['Volume'].rolling(5).mean()
-            low_min = df['Low'].rolling(9).min()
-            high_max = df['High'].rolling(9).max()
-            df['RSV'] = ((df['Close'] - low_min) / (high_max - low_min) * 100).fillna(50)
-            k, d = 50, 50
-            k_list, d_list = [], []
-            for r in df['RSV']:
-                k = (2/3)*k + (1/3)*r
-                d = (2/3)*d + (1/3)*k
-                k_list.append(k)
-                d_list.append(d)
-            df['K'] = k_list
-            df['D'] = d_list
+            self.df = self.ticker.history(period=period)
+            if self.df.empty:
+                return False
             try:
-                eps = fin.get('Net Income', pd.Series()).tail(3)
-                eps_growth = eps.pct_change().mean() * 100 if len(eps) >= 3 else 0
-            except:
-                eps_growth = 0
-            return df, eps_growth, yf_symbol
-        except:
-            return None, None, None
+                self.info = self.ticker.info
+            except Exception:
+                self.info = {}
+            return True
+        except Exception as e:
+            st.error(f"數據獲取失敗: {e}")
+            return False
 
-    def get_news_sentiment(self, yf_symbol):
+    def calculate_technicals(self):
+        if self.df is None or self.df.empty:
+            return
+        # RSI
+        self.df.ta.rsi(length=14, append=True)
+        # MACD
+        self.df.ta.macd(fast=12, slow=26, signal=9, append=True)
+        # Bollinger Bands
+        self.df.ta.bbands(length=20, std=2, append=True)
+        # SMA
+        self.df["SMA_20"] = ta.sma(self.df["Close"], length=20)
+        self.df["SMA_60"] = ta.sma(self.df["Close"], length=60)
+        self.df.dropna(inplace=True)
+
+    def generate_signals(self):
+        if self.df is None or len(self.df) < 2:
+            return []
+
+        last_row = self.df.iloc[-1]
+        prev_row = self.df.iloc[-2]
+        signals = []
+
+        # 黃金/死亡交叉
+        if prev_row["SMA_20"] < prev_row["SMA_60"] and last_row["SMA_20"] > last_row["SMA_60"]:
+            signals.append("🔥 [translate:黃金交叉] (Bullish)")
+        elif prev_row["SMA_20"] > prev_row["SMA_60"] and last_row["SMA_20"] < last_row["SMA_60"]:
+            signals.append("❄️ [translate:死亡交叉] (Bearish)")
+
+        # RSI
+        if last_row["RSI_14"] < 30:
+            signals.append("🟢 RSI [translate:超賣] (Oversold)")
+        elif last_row["RSI_14"] > 70:
+            signals.append("🔴 RSI [translate:超買] (Overbought)")
+
+        # 布林通道
+        if last_row["Close"] < last_row["BBL_20_2.0"]:
+            signals.append("🟢 [translate:跌破下軌] (Potential Rebound)")
+        elif last_row["Close"] > last_row["BBU_20_2.0"]:
+            signals.append("🔴 [translate:突破上軌] (Overextended)")
+
+        return signals
+
+# ==========================================
+# 3. 消息面：OpenAI 情緒分析 (選填)
+# ==========================================
+
+def analyze_sentiment_with_openai(ticker_symbol: str, api_key: str = None):
+    # 1. 嘗試抓取新聞
+    news_list = []
+    try:
+        ticker = yf.Ticker(ticker_symbol)
+        news = ticker.news
+        if news:
+            news_list = [n.get("title", "") for n in news[:5]]
+    except Exception:
+        pass
+
+    # 沒抓到就用模擬標題
+    if not news_list:
+        news_list = [
+            f"{ticker_symbol} beats earnings expectations by 15%",
+            f"Market volatility affects {ticker_symbol} short-term outlook",
+            f"Analysts upgrade {ticker_symbol} following product launch",
+            f"Supply chain issues may impact {ticker_symbol} Q4 results",
+        ]
+
+    # 2. 有 OpenAI Key 才分析，否則 Mock
+    if api_key:
         try:
-            ticker = yf.Ticker(yf_symbol)
-            news_list = ticker.news
-            if not news_list:
-                return "無新聞", 50
-            pos_words = ['up', 'rise', 'gain', 'high', 'strong', 'bull', '新高', '上漲', '獲利']
-            neg_words = ['down', 'fall', 'loss', 'low', 'weak', 'bear', '新低', '下跌', '虧損']
-            score = 50
-            for n in news_list[:3]:
-                title = n.get('title', '').lower()
-                if any(p in title for p in pos_words):
-                    score += 10
-                if any(n in title for n in neg_words):
-                    score -= 10
-            return news_list[0].get('title'), min(max(score, 0), 100)
+            joined_titles = "\n".join(f"- {t}" for t in news_list)
+            client = openai.OpenAI(api_key=api_key)
+            prompt = f"""
+            You are a senior equity analyst. Analyze the sentiment of the following news headlines for {ticker_symbol}:
+            {joined_titles}
+            Return one line only in the format: score|short summary
+            where score is -1 to 1.
+            """
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+            )
+            content = resp.choices[0].message.content.strip()
+            parts = content.split("|", 1)
+            score = float(parts[0].strip())
+            summary = parts[1].strip() if len(parts) > 1 else "Sentiment analyzed."
+            return score, summary, news_list
+        except Exception as e:
+            st.sidebar.error(f"OpenAI Error: {e} (Switching to Demo Mode)")
+
+    mock_score = round(random.uniform(-0.5, 0.8), 2)
+    mock_summary = "Market sentiment is mixed with both opportunities and risks."
+    return mock_score, mock_summary, news_list
+
+# ==========================================
+# 4. 基本面：Perplexity API 分析 (KEY 已填入)
+# ==========================================
+
+# [KEY 設定區] 您的 Perplexity API Key 填在這裡
+DEFAULT_PPLX_KEY = "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"
+
+def get_fundamental_target_with_perplexity(ticker_symbol: str, pplx_key: str = None, current_price: float = None):
+    """
+    利用 Perplexity 搜尋最新分析師目標價與共識
+    """
+    if current_price is None:
+        try:
+            current_price = yf.Ticker(ticker_symbol).history(period="1d")["Close"].iloc[-1]
         except:
-            return "新聞異常", 50
+            current_price = 100.0
 
-class DecisionEngine:
-    def analyze(self, df, eps_growth, sentiment, w_tech, w_theme, period):
-        if df is None or df.empty:
-            return None
-        curr, prev = df.iloc[-1], df.iloc[-2]
-        tech_score = 0
-        if period == 'short':
-            cross = (curr['MA5'] > curr['MA20']) and (prev['MA5'] <= prev['MA20'])
-            if cross:
-                tech_score += 70
-            if curr['Volume'] > curr['MA5_Vol'] * 1.2:
-                tech_score += 30
-        elif period == 'mid':
-            if curr['Close'] > curr['MA20'] > curr['MA60']:
-                tech_score += 40
-            vol_ratio = curr['Volume'] / curr['MA5_Vol'] if curr['MA5_Vol'] > 0 else 1
-            if vol_ratio > 1.2:
-                tech_score += 20
-            kd_gold_cross = (curr['K'] > curr['D']) and (prev['K'] < prev['D'])
-            if kd_gold_cross:
-                tech_score += 40 if curr['K'] < 40 else 20
-            death_cross = (curr['K'] < curr['D']) and (prev['K'] > prev['D'])
-            if death_cross:
-                tech_score -= 20
-            tech_score = max(0, min(100, tech_score))
-        else:
-            if curr['Close'] > curr['MA60']:
-                tech_score += 40
-            if curr['K'] > curr['D']:
-                tech_score += 30
-            tech_score += min(max(eps_growth, 0), 30)
-            tech_score = min(100, tech_score)
-        total = tech_score * w_tech + sentiment * w_theme
-        if total >= 80:
-            rating = "強力買進"
-        elif total >= 60:
-            rating = "買進"
-        elif total <= 40:
-            rating = "賣出"
-        else:
-            rating = "觀望"
-        return {
-            'score': round(total, 1),
-            'rating': rating,
-            'price': curr['Close'],
-            'K': curr['K'],
-            'D': curr['D'],
-            'eps_growth': eps_growth
-        }
+    # 優先使用傳入的 Key，若無則使用預設 Key
+    key_to_use = pplx_key if pplx_key else DEFAULT_PPLX_KEY
 
-def recommend(period, w_tech, w_theme):
-    dm = DataManager()
-    de = DecisionEngine()
-    weight_map = {'short': (1.0, 0.0), 'mid': (0.7, 0.3), 'long': (0.4, 0.6)}
-    wt, wth = weight_map.get(period, (0.7, 0.3))
-    results = []
-    progress = st.progress(0)
-    status = st.empty()
-    total = len(TW_TOP_200)
-    for i, sym in enumerate(TW_TOP_200):
-        status.text(f"分析中: {sym} ({i + 1}/{total})")
-        progress.progress((i + 1) / total)
-        df, eps, yf_sym = dm.fetch_price_and_financials(sym)
-        if df is None:
-            continue
-        _, sent = dm.get_news_sentiment(yf_sym)
-        res = de.analyze(df, eps, sent, w_tech * wt, w_theme * wth, period)
-        if res and res['score'] > 60:
-            results.append((sym, res['score'], res['rating'], res['K'], res['D'], res['eps_growth']))
-    status.empty()
-    progress.empty()
-    return sorted(results, key=lambda x: x[1], reverse=True)[:5]
+    # 若完全無 Key，回退至 Mock
+    if not key_to_use:
+        return _mock_fundamental(current_price)
+
+    try:
+        # 這裡使用 Perplexity 的 Base URL
+        client = openai.OpenAI(
+            api_key=key_to_use,
+            base_url="https://api.perplexity.ai",
+        )
+
+        system_prompt = (
+            "You are a professional equity research analyst. "
+            "Search the latest web news and broker reports. "
+            "Extract the LATEST consensus analyst 12-month target price, rating consensus, and a summary. "
+            "Respond ONLY in valid JSON."
+        )
+
+        user_prompt = f"""
+        Stock: {ticker_symbol}
+        Current Price: {current_price}
+
+        Please search for the latest analyst target price and consensus.
+        Return JSON format:
+        {{
+          "target_price": (number),
+          "consensus": "Buy/Hold/Sell",
+          "summary": "Traditional Chinese summary (max 50 words)"
+        }}
+        """
+
+        # 調用 sonar-pro 模型
+        completion = client.chat.completions.create(
+            model="sonar-pro",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+        )
+
+        raw = completion.choices[0].message.content.strip()
+        
+        # 清理 JSON 格式 (有時候模型會包 ```
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.startswith("json"): raw = raw[4:]
+        
+        data = json.loads(raw)
+
+        target_price = float(data.get("target_price", current_price))
+        consensus = data.get("consensus", "Hold")
+        summary = data.get("summary", "目前市場缺乏明確共識。")
+        
+        upside_pct = (target_price - current_price) / current_price * 100.0
+        return target_price, upside_pct, consensus, summary, False
+
+    except Exception as e:
+        st.sidebar.error(f"Perplexity API Error: {e}")
+        return _mock_fundamental(current_price)
+
+def _mock_fundamental(current_price):
+    """模擬數據 (當 API 失敗時使用)"""
+    target_price = round(current_price * random.uniform(1.05, 1.25), 2)
+    upside_pct = (target_price - current_price) / current_price * 100.0
+    return target_price, upside_pct, "Buy", "Mock Data: Analysts apply cautious optimism.", True
+
+# ==========================================
+# 5. 綜合評分計算
+# ==========================================
+
+def calculate_confidence(tech_signals, sentiment_score, upside_pct):
+    base = 50
+    tech_score = 0
+    for sig in tech_signals:
+        if any(x in sig for x in ["Bullish", "Oversold", "Potential Rebound"]): tech_score += 20
+        if any(x in sig for x in ["Bearish", "Overbought", "Overextended"]): tech_score -= 20
+    
+    tech_norm = max(0, min(100, base + tech_score))
+    sent_norm = (sentiment_score + 1) * 50
+    fund_norm = max(0, min(100, ((upside_pct + 10) / 40) * 100)) # -10% ~ 30% range
+    
+    return int(tech_norm * 0.4 + sent_norm * 0.3 + fund_norm * 0.3)
+
+# ==========================================
+# 6. 繪圖函數
+# ==========================================
+
+def plot_chart(df, ticker):
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
+
+    # K線
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+        name="OHLC", increasing_line_color="#00ff7f", decreasing_line_color="#ff4b4b"
+    ), row=1, col=1)
+    
+    # 均線與布林
+    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', line=dict(color='cyan', width=1)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['BBU_20_2.0'], name='BB Up', line=dict(color='gray', dash='dot', width=0.5)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['BBL_20_2.0'], name='BB Low', line=dict(color='gray', dash='dot', width=0.5), fill='tonexty'), row=1, col=1)
+
+    # MACD
+    fig.add_trace(go.Bar(x=df.index, y=df['MACDh_12_26_9'], name='Hist', marker_color='gray'), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD_12_26_9'], name='MACD', line=dict(color='cyan')), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACDs_12_26_9'], name='Signal', line=dict(color='orange')), row=2, col=1)
+
+    fig.update_layout(
+        title=f"{ticker} Technical Chart", template="plotly_dark", xaxis_rangeslider_visible=False,
+        height=600, margin=dict(l=10,r=10,t=40,b=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
+    )
+    return fig
+
+# ==========================================
+# 7. 主程式介面
+# ==========================================
 
 def main():
-    st.sidebar.header("推薦設定與權重調整")
-    w_tech = st.sidebar.slider("技術面權重", 0.0, 1.0, 0.7)
-    w_theme = st.sidebar.slider("新聞面權重", 0.0, 1.0, 0.3)
-    period = st.sidebar.radio("選擇推薦週期", ['short', 'mid', 'long'], index=0)
+    with st.sidebar:
+        st.title("🤖 AI Quant Pro")
+        ticker_input = st.text_input("Stock Ticker", value="AAPL").upper()
+        period = st.selectbox("Period", ["6mo", "1y", "2y"], index=1)
+        
+        st.markdown("---")
+        st.caption("🔑 API Settings")
+        
+        # OpenAI Key (Optional)
+        openai_key = st.text_input("OpenAI API Key", type="password", help="Optional for sentiment analysis")
+        
+        # Perplexity Key (UI 預設值會讀取上面的變數)
+        pplx_key = st.text_input("Perplexity API Key", value=DEFAULT_PPLX_KEY, type="password")
+        
+        st.markdown("---")
+        run_btn = st.button("🚀 Run Analysis", type="primary")
 
-    st.title("QuantMaster Pro (高流動池+進度條)")
-    st.info("短期用5/20日線黃金交叉判斷，中期維持KD+均線，長期加入EPS基本面")
+    if run_btn:
+        analyzer = StockAnalyzer(ticker_input)
+        
+        with st.spinner(f"Fetching Data for {ticker_input}..."):
+            if not analyzer.fetch_data(period):
+                return
 
-    if st.sidebar.button("開始推薦"):
-        recs = recommend(period, w_tech, w_theme)
-        st.subheader(f"{period}期推薦")
-        for r in recs:
-            st.write(f"{r[0]}：分數 {r[1]}，建議 {r[2]}，K={r[3]:.1f} D={r[4]:.1f}，EPS增長={r[5]:.2f}%")
+        # 1. 技術分析
+        analyzer.calculate_technicals()
+        signals = analyzer.generate_signals()
+        
+        # 2. 價格數據
+        curr_price = analyzer.df['Close'].iloc[-1]
+        pct_chg = ((curr_price - analyzer.df['Close'].iloc[-2]) / analyzer.df['Close'].iloc[-2]) * 100
+        
+        # 3. AI 分析
+        with st.spinner("AI Analyzing Sentiment & Targets..."):
+            # 新聞情緒
+            sent_score, sent_summary, headlines = analyze_sentiment_with_openai(ticker_input, openai_key)
+            
+            # 基本面目標價 (使用 Perplexity)
+            target, upside, consensus, target_sum, is_mock = get_fundamental_target_with_perplexity(
+                ticker_input, pplx_key, curr_price
+            )
+            
+        # 4. 綜合評分
+        conf_score = calculate_confidence(signals, sent_score, upside)
+
+        # --- UI 顯示 ---
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Current Price", f"${curr_price:.2f}", f"{pct_chg:.2f}%")
+        col2.metric("Sentiment Score", f"{sent_score:.2f}")
+        col3.metric("Target Upside", f"{upside:.1f}%", f"Target: ${target}")
+        col4.metric("Confidence", f"{conf_score}/100")
+
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.plotly_chart(plot_chart(analyzer.df, ticker_input), use_container_width=True)
+        with c2:
+            rec_color = "#00ff7f" if conf_score >= 60 else "#ff4b4b"
+            rec_text = "BUY" if conf_score >= 60 else "SELL/HOLD"
+            
+            st.markdown(f"""
+            <div class="card" style="border-left: 5px solid {rec_color};">
+                <h2 style="color:{rec_color}; margin:0;">{rec_text}</h2>
+                <p class="sub-text">Score: {conf_score}</p>
+                <hr style="border-color: #333;">
+                <p><strong>Analyst Consensus:</strong> {consensus}</p>
+                <p style="font-size:0.9rem">{target_sum}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            with st.expander("Recent News"):
+                for h in headlines: st.write(f"- {h}")
+            
+            if is_mock: st.caption("⚠️ Using Mock Data (API Error)")
+
+        st.dataframe(analyzer.df.tail(5)[['Close', 'RSI_14', 'SMA_20', 'MACD_12_26_9']])
 
 if __name__ == "__main__":
     main()
